@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Memory Profiler - Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --card-bg: #161b22;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --accent: #58a6ff;
+            --free: #3fb950;
+            --used: #f78166;
+            --total: #8b949e;
+            --increase: #3fb950;
+            --decrease: #f78166;
+            --warning-bg: #3d1f1f;
+            --warning-border: #f85149;
+            --warning-text: #ffb0b0;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        h1 { margin-bottom: 1rem; font-size: 2.2rem; font-weight: 300; color: #e6edf3; }
+        .mode-bar {
+            display: flex; gap: 1rem; align-items: center; justify-content: center;
+            margin-bottom: 1rem; flex-wrap: wrap;
+        }
+        .toggle-switch {
+            position: relative; display: inline-block; width: 60px; height: 30px;
+        }
+        .toggle-switch input { opacity: 0; width: 0; height: 0; }
+        .slider {
+            position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #f78166; border-radius: 34px; transition: .3s;
+        }
+        .slider:before {
+            position: absolute; content: ""; height: 22px; width: 22px;
+            left: 4px; bottom: 4px; background-color: white; border-radius: 50%; transition: .3s;
+        }
+        input:checked + .slider { background-color: #3fb950; }
+        input:checked + .slider:before { transform: translateX(30px); }
+        .mode-label {
+            font-weight: 600; font-size: 0.9rem; min-width: 60px; text-align: center;
+        }
+        .snapshot-count {
+            background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px;
+            padding: 0.3rem 1rem; font-size: 0.9rem;
+        }
+        .status-message {
+            background: #1a1a2e; border: 1px solid var(--border); border-radius: 6px;
+            padding: 0.5rem 1.5rem; margin-bottom: 1rem; max-width: 800px; width: 100%;
+            color: #e6edf3; font-size: 0.9rem; display: flex; align-items: center; gap: 0.5rem;
+        }
+        .warning-banner {
+            background: var(--warning-bg); border: 1px solid var(--warning-border);
+            border-radius: 8px; padding: 0.75rem 1.5rem; margin-bottom: 2rem;
+            display: flex; align-items: center; gap: 0.75rem; max-width: 800px; width: 100%;
+            color: var(--warning-text); position: relative;
+        }
+        .warning-banner .icon { font-size: 1.5rem; color: var(--warning-border); }
+        .warning-banner .text { font-size: 0.9rem; line-height: 1.4; flex: 1; }
+        .warning-banner .close-banner {
+            background: none; border: none; color: var(--warning-text); font-size: 1.3rem;
+            cursor: pointer; padding: 0; line-height: 1; opacity: 0.7; transition: opacity 0.2s;
+        }
+        .warning-banner .close-banner:hover { opacity: 1; }
+        .status-bar {
+            display: flex; gap: 1.5rem; flex-wrap: wrap; justify-content: center; margin-bottom: 2rem;
+        }
+        .card {
+            background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+            padding: 1rem 2rem; text-align: center; min-width: 150px; position: relative;
+        }
+        .card .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; color: #8b949e; margin-bottom: 0.25rem; }
+        .card .value { font-size: 1.8rem; font-weight: 600; color: #e6edf3; }
+        .card .delta { font-size: 0.9rem; margin-left: 8px; display: inline-block; }
+        .delta.positive { color: var(--increase); }
+        .delta.negative { color: var(--decrease); }
+        .grid-charts { display: flex; flex-wrap: wrap; justify-content: center; gap: 2rem; max-width: 1000px; }
+        .chart-container {
+            background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+            padding: 1rem; width: 280px; display: flex; flex-direction: column; align-items: center;
+        }
+        .chart-container canvas { max-width: 200px; max-height: 200px; }
+        .chart-title { font-size: 1rem; font-weight: 600; margin-bottom: 0.5rem; color: #c9d1d9; }
+        .variations-section { margin-top: 2rem; width: 100%; max-width: 800px; }
+        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+        .section-header h2 { font-weight: 300; color: #e6edf3; }
+        .btn {
+            background: var(--border); color: #c9d1d9; border: 1px solid var(--border);
+            padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;
+            transition: background 0.2s;
+        }
+        .btn:hover { background: #1f2937; }
+        table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+        th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid var(--border); }
+        th { color: #8b949e; font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        td { font-size: 0.9rem; }
+        .modal {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7); justify-content: center; align-items: center; z-index: 1000;
+        }
+        .modal-content {
+            background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+            padding: 2rem; max-width: 700px; width: 90%; max-height: 80vh; overflow-y: auto; position: relative;
+        }
+        .modal-close { position: absolute; top: 1rem; right: 1rem; background: none; border: none; color: #8b949e; font-size: 1.5rem; cursor: pointer; }
+        .timestamp { margin-top: 2rem; font-size: 0.85rem; color: #8b949e; }
+        .evolution-section { display: none; margin-top: 2rem; width: 100%; max-width: 900px; }
+        .line-chart-container {
+            background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+            padding: 1rem; margin-bottom: 2rem;
+        }
+        .file-list { list-style: none; margin: 1rem 0; }
+        .file-item {
+            padding: 0.7rem; border-bottom: 1px solid var(--border); cursor: pointer;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .file-item:hover { background: #1c2128; }
+        .file-item .fname { font-weight: 600; }
+        .file-item .fmeta { font-size: 0.8rem; color: #8b949e; }
+    </style>
+</head>
+<body>
+    <h1>📊 ESP32 Memory Profiler</h1>
+
+    <div class="mode-bar">
+        <span class="mode-label" id="mode-label">Ao Vivo</span>
+        <label class="toggle-switch">
+            <input type="checkbox" id="mode-toggle">
+            <span class="slider"></span>
+        </label>
+        <span class="mode-label" style="color: #8b949e;">Offline</span>
+        <span class="snapshot-count" id="snap-count">📦 0 snapshots</span>
+        <button class="btn" id="btn-load">📂 Carregar arquivo JSONL</button>
+    </div>
+
+    <div class="status-message" id="status-message" style="display: none;"></div>
+
+    <div class="warning-banner" id="warning-banner">
+        <span class="icon">⚠️</span>
+        <span class="text">
+            <strong>Atenção:</strong> As regiões DRAM e IRAM se sobrepõem na SRAM interna do ESP32.
+            Os valores mostrados para DRAM e IRAM não são independentes – a soma pode ultrapassar o total físico.
+            Considere o gráfico de SRAM para visão consolidada.
+        </span>
+        <button class="close-banner" id="close-banner-btn" title="Fechar aviso">✕</button>
+    </div>
+
+    <div class="status-bar">
+        <div class="card">
+            <div class="label">SRAM Total</div>
+            <div class="value" id="sram-total">--</div>
+        </div>
+        <div class="card">
+            <div class="label">DRAM Livre</div>
+            <div class="value" id="dram-free">--</div>
+            <span class="delta" id="dram-delta"></span>
+        </div>
+        <div class="card">
+            <div class="label">IRAM Livre</div>
+            <div class="value" id="iram-free">--</div>
+            <span class="delta" id="iram-delta"></span>
+        </div>
+        <div class="card">
+            <div class="label">Maior Bloco Livre</div>
+            <div class="value" id="max-block">--</div>
+            <span class="delta" id="max-block-delta"></span>
+        </div>
+        <div class="card">
+            <div class="label">Última leitura</div>
+            <div class="value" id="test-id" style="font-size:1.2rem;">--</div>
+        </div>
+    </div>
+
+    <div class="grid-charts">
+        <div class="chart-container">
+            <div class="chart-title">SRAM (Interna Total)</div>
+            <canvas id="chart-sram"></canvas>
+        </div>
+        <div class="chart-container">
+            <div class="chart-title">DRAM (Dados)</div>
+            <canvas id="chart-dram"></canvas>
+        </div>
+        <div class="chart-container">
+            <div class="chart-title">IRAM (Execução)</div>
+            <canvas id="chart-iram"></canvas>
+        </div>
+    </div>
+
+    <div style="margin-top: 2rem;">
+        <button class="btn" id="btn-toggle-evolution">📈 Mostrar Evolução (gráficos)</button>
+    </div>
+
+    <div class="evolution-section" id="evolution-section">
+        <div class="line-chart-container">
+            <div class="chart-title">Evolução da SRAM Livre</div>
+            <canvas id="line-sram" height="120"></canvas>
+        </div>
+        <div class="line-chart-container">
+            <div class="chart-title">Evolução da DRAM Livre</div>
+            <canvas id="line-dram" height="120"></canvas>
+        </div>
+        <div class="line-chart-container">
+            <div class="chart-title">Evolução da IRAM Livre</div>
+            <canvas id="line-iram" height="120"></canvas>
+        </div>
+    </div>
+
+    <div class="variations-section">
+        <div class="section-header">
+            <h2>📈 Variações Recentes</h2>
+            <button class="btn" id="btn-show-all">Ver histórico completo</button>
+        </div>
+        <table id="variations-table">
+            <thead>
+                <tr>
+                    <th>Teste</th>
+                    <th>DRAM Livre</th>
+                    <th>Δ DRAM</th>
+                    <th>IRAM Livre</th>
+                    <th>Δ IRAM</th>
+                    <th>Maior Bloco</th>
+                    <th>Δ</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <!-- Modal histórico completo -->
+    <div class="modal" id="history-modal">
+        <div class="modal-content">
+            <button class="modal-close" id="modal-close">&times;</button>
+            <h2 style="margin-bottom: 1rem;">Histórico Completo de Variações</h2>
+            <table id="history-table">
+                <thead>
+                    <tr>
+                        <th>Teste</th>
+                        <th>DRAM Livre</th>
+                        <th>Δ DRAM</th>
+                        <th>IRAM Livre</th>
+                        <th>Δ IRAM</th>
+                        <th>Maior Bloco</th>
+                        <th>Δ</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Modal carregar arquivo JSONL -->
+    <div class="modal" id="load-modal">
+        <div class="modal-content">
+            <button class="modal-close" id="load-modal-close">&times;</button>
+            <h2 style="margin-bottom: 1rem;">Escolher um arquivo JSONL</h2>
+            <ul class="file-list" id="file-list"></ul>
+            <p id="load-empty-msg" style="display: none; color: #8b949e; margin-top: 1rem;">Nenhum arquivo .jsonl encontrado na pasta data/.</p>
+        </div>
+    </div>
+
+    <div class="timestamp" id="timestamp">Aguardando dados...</div>
+
+    <script>
+        // Estado global
+        let mode = 'online';
+        let pollingInterval = null;
+        let loadedSnapshots = null;
+
+        const freeColor = '#3fb950';
+        const usedColor = '#f78166';
+
+        const sramChart = new Chart(document.getElementById('chart-sram'), {
+            type: 'doughnut',
+            data: { labels: ['Usado', 'Livre'], datasets: [{ data: [1, 1], backgroundColor: [usedColor, freeColor], borderColor: 'rgba(0,0,0,0.3)', borderWidth: 2 }] },
+            options: { cutout: '70%', plugins: { legend: { display: false } } }
+        });
+        const dramChart = new Chart(document.getElementById('chart-dram'), {
+            type: 'doughnut',
+            data: { labels: ['Usado', 'Livre'], datasets: [{ data: [1, 1], backgroundColor: [usedColor, freeColor], borderColor: 'rgba(0,0,0,0.3)', borderWidth: 2 }] },
+            options: { cutout: '70%', plugins: { legend: { display: false } } }
+        });
+        const iramChart = new Chart(document.getElementById('chart-iram'), {
+            type: 'doughnut',
+            data: { labels: ['Usado', 'Livre'], datasets: [{ data: [1, 1], backgroundColor: [usedColor, freeColor], borderColor: 'rgba(0,0,0,0.3)', borderWidth: 2 }] },
+            options: { cutout: '70%', plugins: { legend: { display: false } } }
+        });
+
+        let lineSramChart, lineDramChart, lineIramChart;
+        let evolutionVisible = false;
+
+        function createLineCharts() {
+            if (lineSramChart) return;
+            lineSramChart = new Chart(document.getElementById('line-sram'), {
+                type: 'line',
+                data: { labels: [], datasets: [{ label: 'SRAM Livre', data: [], borderColor: freeColor, tension: 0.1 }] },
+                options: { responsive: true, scales: { y: { beginAtZero: false } } }
+            });
+            lineDramChart = new Chart(document.getElementById('line-dram'), {
+                type: 'line',
+                data: { labels: [], datasets: [{ label: 'DRAM Livre', data: [], borderColor: freeColor, tension: 0.1 }] },
+                options: { responsive: true, scales: { y: { beginAtZero: false } } }
+            });
+            lineIramChart = new Chart(document.getElementById('line-iram'), {
+                type: 'line',
+                data: { labels: [], datasets: [{ label: 'IRAM Livre', data: [], borderColor: freeColor, tension: 0.1 }] },
+                options: { responsive: true, scales: { y: { beginAtZero: false } } }
+            });
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === undefined || bytes === null) return '--';
+            const num = Number(bytes);
+            if (num >= 1048576) return (num / 1048576).toFixed(2) + ' MB';
+            if (num >= 1024) return (num / 1024).toFixed(1) + ' KB';
+            return num + ' B';
+        }
+
+        function formatDelta(delta) {
+            if (delta === undefined || delta === null) return '';
+            const abs = Math.abs(delta);
+            const sign = delta >= 0 ? '+' : '−';
+            return sign + formatBytes(abs);
+        }
+
+        function updateDeltaElement(element, delta) {
+            if (!element) return;
+            element.innerHTML = formatDelta(delta);
+            element.className = 'delta ' + (delta >= 0 ? 'positive' : 'negative');
+        }
+
+        function updateDashboard(data, variationsList = null) {
+            if (!data || !data.snapshot) return;
+            const snap = data.snapshot;
+            const variation = data.variation;
+
+            document.getElementById('sram-total').textContent = formatBytes(snap.sram_total);
+            document.getElementById('dram-free').textContent = formatBytes(snap.dram_livre);
+            document.getElementById('iram-free').textContent = formatBytes(snap.iram_livre);
+            document.getElementById('max-block').textContent = formatBytes(snap.maior_bloco_livre);
+            document.getElementById('test-id').textContent = snap.teste || '--';
+            document.getElementById('timestamp').textContent = 'Última atualização: ' + new Date().toLocaleTimeString();
+
+            updateDeltaElement(document.getElementById('dram-delta'), variation?.delta_dram);
+            updateDeltaElement(document.getElementById('iram-delta'), variation?.delta_iram);
+            updateDeltaElement(document.getElementById('max-block-delta'), variation?.delta_maior_bloco);
+
+            function updateChart(chart, total, livre) {
+                if (total === undefined || livre === undefined) return;
+                const usado = total - livre;
+                chart.data.datasets[0].data = [usado, livre];
+                chart.update();
+            }
+            updateChart(sramChart, snap.sram_total, snap.sram_livre);
+            updateChart(dramChart, snap.dram_total, snap.dram_livre);
+            updateChart(iramChart, snap.iram_total, snap.iram_livre);
+
+            if (variationsList !== null) fillVariationsTable(variationsList);
+
+            if (data.count !== undefined) {
+                document.getElementById('snap-count').textContent = `📦 ${data.count} snapshots`;
+            }
+        }
+
+        function fillVariationsTable(variations) {
+            const tbody = document.querySelector('#variations-table tbody');
+            tbody.innerHTML = '';
+            variations.forEach(v => {
+                const row = tbody.insertRow();
+                row.insertCell().textContent = v.teste;
+                row.insertCell().textContent = formatBytes(v.dram_livre);
+                row.insertCell().innerHTML = `<span class="delta ${v.delta_dram >= 0 ? 'positive' : 'negative'}">${formatDelta(v.delta_dram)}</span>`;
+                row.insertCell().textContent = formatBytes(v.iram_livre);
+                row.insertCell().innerHTML = `<span class="delta ${v.delta_iram >= 0 ? 'positive' : 'negative'}">${formatDelta(v.delta_iram)}</span>`;
+                row.insertCell().textContent = formatBytes(v.maior_bloco_livre);
+                row.insertCell().innerHTML = `<span class="delta ${v.delta_maior_bloco >= 0 ? 'positive' : 'negative'}">${formatDelta(v.delta_maior_bloco)}</span>`;
+            });
+        }
+
+        function updateLineChartsFromSnapshots(snapshots) {
+            if (!lineSramChart) return;
+            const labels = snapshots.map(s => s.teste);
+            lineSramChart.data.labels = labels;
+            lineSramChart.data.datasets[0].data = snapshots.map(s => s.sram_livre);
+            lineSramChart.update();
+            lineDramChart.data.labels = labels;
+            lineDramChart.data.datasets[0].data = snapshots.map(s => s.dram_livre);
+            lineDramChart.update();
+            lineIramChart.data.labels = labels;
+            lineIramChart.data.datasets[0].data = snapshots.map(s => s.iram_livre);
+            lineIramChart.update();
+        }
+
+        function setStatus(message, isError = false) {
+            const el = document.getElementById('status-message');
+            if (!message) {
+                el.style.display = 'none';
+                return;
+            }
+            el.style.display = 'flex';
+            el.innerHTML = `<span>${isError ? '❌' : 'ℹ️'}</span> ${message}`;
+            if (!isError) setTimeout(() => el.style.display = 'none', 5000);
+        }
+
+        async function startPolling() {
+            if (pollingInterval) clearInterval(pollingInterval);
+            pollingInterval = setInterval(async () => {
+                if (mode !== 'online') return;
+                try {
+                    const resp = await fetch('/api/memory');
+                    const data = await resp.json();
+                    if (!data.snapshot) {
+                        setStatus('Nenhum snapshot recebido. Execute o script de captura serial.', true);
+                        document.getElementById('snap-count').textContent = '📦 0 snapshots';
+                        return;
+                    }
+                    const varsResp = await fetch('/api/variations?limit=5');
+                    const variations = await varsResp.json();
+                    updateDashboard(data, variations);
+                    if (evolutionVisible) {
+                        const histResp = await fetch('/api/history');
+                        const history = await histResp.json();
+                        updateLineChartsFromSnapshots(history);
+                    }
+                    setStatus('', false);
+                } catch (e) {
+                    setStatus('Erro de conexão com o servidor.', true);
+                }
+            }, 1000);
+        }
+
+        function stopPolling() {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+                pollingInterval = null;
+            }
+        }
+
+        function setMode(newMode) {
+            mode = newMode;
+            const toggle = document.getElementById('mode-toggle');
+            if (newMode === 'online') {
+                toggle.checked = false;
+                document.getElementById('mode-label').textContent = 'Ao Vivo';
+                document.getElementById('mode-label').style.color = '#3fb950';
+                startPolling();
+                setStatus('');
+            } else {
+                toggle.checked = true;
+                document.getElementById('mode-label').textContent = 'Offline';
+                document.getElementById('mode-label').style.color = '#e6c300';
+                stopPolling();
+                if (!loadedSnapshots) {
+                    setStatus('Nenhum arquivo carregado. Use "Carregar arquivo JSONL".', false);
+                }
+            }
+        }
+
+        async function loadOfflineFile(filename) {
+            try {
+                const response = await fetch('/api/load/' + filename);
+                const snapshots = await response.json();
+                if (!Array.isArray(snapshots) || snapshots.length === 0) {
+                    alert('Arquivo vazio ou inválido.');
+                    return;
+                }
+                loadedSnapshots = snapshots;
+                setMode('offline');
+                document.getElementById('load-modal').style.display = 'none';
+
+                const last = snapshots[snapshots.length-1];
+                let variation = null;
+                if (snapshots.length >= 2) {
+                    const prev = snapshots[snapshots.length-2];
+                    variation = {
+                        delta_sram: last.sram_livre - prev.sram_livre,
+                        delta_dram: last.dram_livre - prev.dram_livre,
+                        delta_iram: last.iram_livre - prev.iram_livre,
+                        delta_maior_bloco: (last.maior_bloco_livre||0) - (prev.maior_bloco_livre||0)
+                    };
+                }
+                const variations = calculateVariationsFromSnapshots(snapshots);
+                updateDashboard({ snapshot: last, variation, count: snapshots.length }, variations.slice(-5));
+                document.getElementById('snap-count').textContent = `📦 ${snapshots.length} snapshots (offline)`;
+
+                if (evolutionVisible) {
+                    createLineCharts();
+                    updateLineChartsFromSnapshots(snapshots);
+                }
+                setStatus(`Arquivo "${filename}" carregado com sucesso.`, false);
+            } catch (e) {
+                alert('Erro ao carregar arquivo.');
+            }
+        }
+
+        function calculateVariationsFromSnapshots(snapshots) {
+            const vars = [];
+            for (let i = 1; i < snapshots.length; i++) {
+                const prev = snapshots[i-1], curr = snapshots[i];
+                vars.push({
+                    teste: curr.teste || '?',
+                    sram_livre: curr.sram_livre, dram_livre: curr.dram_livre, iram_livre: curr.iram_livre,
+                    maior_bloco_livre: curr.maior_bloco_livre,
+                    delta_sram: curr.sram_livre - prev.sram_livre,
+                    delta_dram: curr.dram_livre - prev.dram_livre,
+                    delta_iram: curr.iram_livre - prev.iram_livre,
+                    delta_maior_bloco: (curr.maior_bloco_livre||0) - (prev.maior_bloco_livre||0)
+                });
+            }
+            return vars;
+        }
+
+        // Fechar banner de aviso
+        document.getElementById('close-banner-btn').addEventListener('click', () => {
+            document.getElementById('warning-banner').style.display = 'none';
+        });
+
+        // Eventos dos botões
+        document.getElementById('mode-toggle').addEventListener('change', function() {
+            if (this.checked) {
+                setMode('offline');
+            } else {
+                setMode('online');
+            }
+        });
+
+        document.getElementById('btn-load').addEventListener('click', async () => {
+            try {
+                const response = await fetch('/api/saves');
+                const files = await response.json();
+                const listEl = document.getElementById('file-list');
+                const emptyMsg = document.getElementById('load-empty-msg');
+                listEl.innerHTML = '';
+                if (files.length === 0) {
+                    emptyMsg.style.display = 'block';
+                } else {
+                    emptyMsg.style.display = 'none';
+                    files.forEach(file => {
+                        const li = document.createElement('li');
+                        li.className = 'file-item';
+                        li.innerHTML = `<span class="fname">${file.filename}</span><span class="fmeta">${(file.size/1024).toFixed(1)} KB</span>`;
+                        li.addEventListener('click', () => loadOfflineFile(file.filename));
+                        listEl.appendChild(li);
+                    });
+                }
+                document.getElementById('load-modal').style.display = 'flex';
+            } catch (e) {
+                alert('Erro ao listar arquivos.');
+            }
+        });
+
+        document.getElementById('load-modal-close').addEventListener('click', () => {
+            document.getElementById('load-modal').style.display = 'none';
+        });
+        window.onclick = function(event) {
+            const loadModal = document.getElementById('load-modal');
+            if (event.target === loadModal) loadModal.style.display = 'none';
+        };
+
+        document.getElementById('btn-show-all').addEventListener('click', async () => {
+            const modal = document.getElementById('history-modal');
+            modal.style.display = 'flex';
+            let allVariations;
+            if (mode === 'offline' && loadedSnapshots) {
+                allVariations = calculateVariationsFromSnapshots(loadedSnapshots);
+            } else {
+                const response = await fetch('/api/all_variations');
+                allVariations = await response.json();
+            }
+            const tbody = document.querySelector('#history-table tbody');
+            tbody.innerHTML = '';
+            allVariations.forEach(v => {
+                const row = tbody.insertRow();
+                row.insertCell().textContent = v.teste;
+                row.insertCell().textContent = formatBytes(v.dram_livre);
+                row.insertCell().innerHTML = `<span class="delta ${v.delta_dram >= 0 ? 'positive' : 'negative'}">${formatDelta(v.delta_dram)}</span>`;
+                row.insertCell().textContent = formatBytes(v.iram_livre);
+                row.insertCell().innerHTML = `<span class="delta ${v.delta_iram >= 0 ? 'positive' : 'negative'}">${formatDelta(v.delta_iram)}</span>`;
+                row.insertCell().textContent = formatBytes(v.maior_bloco_livre);
+                row.insertCell().innerHTML = `<span class="delta ${v.delta_maior_bloco >= 0 ? 'positive' : 'negative'}">${formatDelta(v.delta_maior_bloco)}</span>`;
+            });
+        });
+
+        document.getElementById('modal-close').addEventListener('click', () => {
+            document.getElementById('history-modal').style.display = 'none';
+        });
+
+        document.getElementById('btn-toggle-evolution').addEventListener('click', () => {
+            const section = document.getElementById('evolution-section');
+            evolutionVisible = !evolutionVisible;
+            section.style.display = evolutionVisible ? 'block' : 'none';
+            document.getElementById('btn-toggle-evolution').textContent = evolutionVisible ? '🔽 Ocultar Evolução' : '📈 Mostrar Evolução (gráficos)';
+            if (evolutionVisible) {
+                createLineCharts();
+                if (mode === 'offline' && loadedSnapshots) {
+                    updateLineChartsFromSnapshots(loadedSnapshots);
+                } else {
+                    fetch('/api/history').then(r => r.json()).then(updateLineChartsFromSnapshots);
+                }
+            }
+        });
+
+        // Inicializa
+        setMode('online');
+    </script>
+</body>
+</html>

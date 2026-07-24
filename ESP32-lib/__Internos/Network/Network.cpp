@@ -28,7 +28,12 @@ namespace {
     }
 }
 
-Network::Network() : m_initialized(false) {
+Network::Network()
+    : m_initialized(false),
+      ssid(),
+      senha(),
+      maxTentativas(0),
+      tentativas(0) {
     init();
 }
 
@@ -55,12 +60,53 @@ void Network::init() {
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+    // Registra o handler estatico para os eventos de WiFi (ex.: desconexao)
+    // e de IP (ex.: IP obtido apos conectar), repassando "this" para que o
+    // handler consiga acessar o estado da instancia.
+    // >>> Esta era a peca que faltava: sem isso, eventHandler() nunca
+    //     e chamado e a reconexao automatica nao acontece.
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &Network::eventHandler, this, nullptr));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, &Network::eventHandler, this, nullptr));
+
     ESP_ERROR_CHECK(esp_wifi_start());
 
     m_initialized = true;
 }
 
-void Network::scanNetworks() {
+void Network::eventHandler(void* arg, esp_event_base_t eventBase,
+                           int32_t eventId, void* eventData) {
+    Network* self = static_cast<Network*>(arg);
+    if (self == nullptr) {
+        return;
+    }
+
+    if (eventBase == WIFI_EVENT && eventId == WIFI_EVENT_STA_DISCONNECTED) {
+        if (self->tentativas < self->maxTentativas) {
+            self->tentativas++;
+            ESP_LOGW(TAG, "Desconectado da rede \"%s\". Tentando reconectar (%d/%d)...",
+                     self->ssid.c_str(), self->tentativas, self->maxTentativas);
+            esp_wifi_connect();
+        } else {
+            ESP_LOGE(TAG, "Falha ao reconectar a \"%s\" apos %d tentativas. Desistindo.",
+                     self->ssid.c_str(), self->maxTentativas);
+        }
+    } else if (eventBase == IP_EVENT && eventId == IP_EVENT_STA_GOT_IP) {
+        self->tentativas = 0;
+        auto* event = static_cast<ip_event_got_ip_t*>(eventData);
+        uint32_t ip = event->ip_info.ip.addr;
+        ESP_LOGI(TAG, "Conectado a \"%s\"! IP obtido: %d.%d.%d.%d",
+                 self->ssid.c_str(),
+                 static_cast<int>(ip & 0xFF),
+                 static_cast<int>((ip >> 8) & 0xFF),
+                 static_cast<int>((ip >> 16) & 0xFF),
+                 static_cast<int>((ip >> 24) & 0xFF));
+    }
+}
+
+void Network::escanearRedes() {
     if (!m_initialized) {
         init();
     }
@@ -114,4 +160,39 @@ void Network::scanNetworks() {
     }
 
     ESP_LOGI(TAG, "-------------------------------------------------------------");
+}
+
+void Network::connect(const std::string& ssid, const std::string& senha, int maxTentativas) {
+    if (!m_initialized) {
+        init();
+    }
+
+    // IMPORTANTE: os parametros tem o mesmo nome dos membros da classe
+    // (shadowing). Por isso usamos "this->" para deixar explicito que
+    // estamos gravando nos membros, e nao apenas manipulando variaveis
+    // locais que desaparecem ao fim da funcao.
+    this->ssid = ssid;
+    this->senha = senha;
+    this->maxTentativas = maxTentativas;
+    this->tentativas = 0;
+
+    wifi_config_t wifiConfig = {};
+
+    strncpy(reinterpret_cast<char*>(wifiConfig.sta.ssid),
+            ssid.c_str(), sizeof(wifiConfig.sta.ssid) - 1);
+
+    strncpy(reinterpret_cast<char*>(wifiConfig.sta.password),
+            senha.c_str(), sizeof(wifiConfig.sta.password) - 1);
+
+    wifiConfig.sta.threshold.authmode = senha.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifiConfig));
+
+    ESP_LOGI(TAG, "Conectando a rede \"%s\" (max. %d tentativas de reconexao)...",
+             ssid.c_str(), maxTentativas);
+
+    esp_err_t err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Falha ao iniciar conexao: %s", esp_err_to_name(err));
+    }
 }

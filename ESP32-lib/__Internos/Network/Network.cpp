@@ -1,427 +1,585 @@
 #include "Network.hpp"
-#include "nvs_flash.h"
-#include "esp_log.h"
+
 #include <cstring>
-#include <algorithm>
 
-static const char* TAG = "NETWORK";
+#include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "nvs_flash.h"
+#include "esp_crt_bundle.h"
+#include "NetworkHandler.hpp"
 
-// Página HTML do portal
-static const char* HTML_FORM = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Configurar Wi-Fi</title>
-    <style>
-        body { font-family: Arial; background: #f2f2f2; margin: 2em; }
-        .container { background: white; padding: 2em; border-radius: 10px; max-width: 400px; margin: auto; }
-        input { width: 100%; padding: 10px; margin: 8px 0; box-sizing: border-box; }
-        input[type=submit] { background: #4CAF50; color: white; border: none; border-radius: 5px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h2>Conectar à rede</h2>
-        <form action="/connect" method="POST">
-            <label>SSID:</label>
-            <input type="text" name="ssid" required>
-            <label>Senha:</label>
-            <input type="password" name="password">
-            <input type="submit" value="Conectar">
-        </form>
-    </div>
-</body>
-</html>
-)rawliteral";
+namespace {
+    constexpr const char* TAG = "Network";
+    constexpr uint16_t    MAX_AP_RECORDS = 20;
+    constexpr EventBits_t WIFI_CONNECTED_BIT = BIT0;
+    constexpr EventBits_t WIFI_FAIL_BIT      = BIT1;
 
-// ==============================
-// Singleton
-// ==============================
-Network& Network::getInstance() {
-    static Network instance;
-    return instance;
-}
-
-// ==============================
-// Handlers de eventos WiFi
-// ==============================
-void Network::wifi_event_handler(void* arg, esp_event_base_t event_base,
-                                 int32_t event_id, void* event_data) {
-    Network* self = static_cast<Network*>(arg);
-    if (!self) return;
-
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        ESP_LOGI(TAG, "Rádio iniciado, conectando...");
-        esp_wifi_connect();
-    }
-    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (self->_tentativas < MAX_RECONEXOES) {
-            esp_wifi_connect();
-            self->_tentativas++;
-            ESP_LOGW(TAG, "Reconexão %d/%d...", self->_tentativas, MAX_RECONEXOES);
-        } else {
-            xEventGroupSetBits(self->_wifi_event_group, WIFI_FAIL_BIT);
+    /**
+     * @brief Converte o modo de autenticação do Wi-Fi para uma string legível.
+     * 
+     * @param authMode Enumeração do tipo wifi_auth_mode_t contendo o modo de autenticação do AP.
+     * @return const char* Ponteiro para a string literal correspondente ao modo de segurança.
+     */
+    const char* authModeParaString(wifi_auth_mode_t authMode) {
+        switch (authMode) {
+            case WIFI_AUTH_OPEN:            return "OPEN";
+            case WIFI_AUTH_WEP:             return "WEP";
+            case WIFI_AUTH_WPA_PSK:         return "WPA_PSK";
+            case WIFI_AUTH_WPA2_PSK:        return "WPA2_PSK";
+            case WIFI_AUTH_WPA_WPA2_PSK:    return "WPA_WPA2_PSK";
+            case WIFI_AUTH_WPA2_ENTERPRISE: return "WPA2_ENTERPRISE";
+            case WIFI_AUTH_WPA3_PSK:        return "WPA3_PSK";
+            case WIFI_AUTH_WPA2_WPA3_PSK:   return "WPA2_WPA3_PSK";
+            default:                        return "UNKNOWN";
         }
-        self->_conectado = false;
-        ESP_LOGE(TAG, "Desconectado.");
     }
-    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        auto* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "IP obtido: " IPSTR, IP2STR(&event->ip_info.ip));
-        self->_tentativas = 0;
-        self->_conectado = true;
-        xEventGroupSetBits(self->_wifi_event_group, WIFI_CONNECTED_BIT);
-    }
-}
 
-// ==============================
-// Handlers HTTP do portal
-// ==============================
-esp_err_t Network::http_get_handler(httpd_req_t *req) {
-    httpd_resp_send(req, HTML_FORM, strlen(HTML_FORM));
-    return ESP_OK;
-}
-
-esp_err_t Network::http_post_handler(httpd_req_t *req) {
-    char buf[100];
-    int ret, remaining = req->content_len;
-    std::string body;
-
-    while (remaining > 0) {
-        int to_read = std::min(remaining, (int)sizeof(buf) - 1);
-        ret = httpd_req_recv(req, buf, to_read);
-        if (ret <= 0) {
-            if (ret == HTTPD_SOCK_ERR_TIMEOUT) continue;
-            return ESP_FAIL;
+     /**
+     * @brief Converte o ModoRede interno para o wifi_mode_t do ESP-IDF.
+     */
+    wifi_mode_t configRedeParaWifiMode(ConfigRede config) {
+        switch (config) {
+            case ConfigRede::STA:    return WIFI_MODE_STA;
+            case ConfigRede::AP:     return WIFI_MODE_AP;
+            case ConfigRede::AP_STA: return WIFI_MODE_APSTA;
+            default:               return WIFI_MODE_STA;
         }
-        buf[ret] = '\0';
-        body += buf;
-        remaining -= ret;
-    }
-
-    auto get_param = [&](const std::string& key) -> std::string {
-        size_t start = body.find(key + "=");
-        if (start == std::string::npos) return "";
-        start += key.length() + 1;
-        size_t end = body.find("&", start);
-        if (end == std::string::npos) end = body.length();
-        return body.substr(start, end - start);
-    };
-
-    // ✅ Decodifica URL encoding (ex: %40 → @, + → espaço)
-    auto url_decode = [](const std::string& s) -> std::string {
-        std::string out;
-        out.reserve(s.size());
-        for (size_t i = 0; i < s.size(); ++i) {
-            if (s[i] == '+') {
-                out += ' ';
-            } else if (s[i] == '%' && i + 2 < s.size()) {
-                char hex[3] = { s[i+1], s[i+2], '\0' };
-                out += static_cast<char>(strtol(hex, nullptr, 16));
-                i += 2;
-            } else {
-                out += s[i];
-            }
-        }
-        return out;
-    };
-
-    Network& net = Network::getInstance();
-    net._ssid     = url_decode(get_param("ssid"));      // ✅ decodificado
-    net._password = url_decode(get_param("password"));  // ✅ decodificado
-
-    xSemaphoreGive(net._credenciais_prontas);
-
-    const char* resp = "Credenciais recebidas! Tentando conectar...";
-    httpd_resp_send(req, resp, strlen(resp));
-    return ESP_OK;
-}
-
-// ==============================
-// Construtor / Destrutor
-// ==============================
-Network::Network() : _conectado(false),
-                     _tentativas(0),
-                     _handlers_registrados(false),
-                     _server(nullptr),
-                     _credenciais_prontas(nullptr) {
-    _inicializar_nvs();
-    _inicializar_stack_rede();
-
-    _wifi_event_group = xEventGroupCreate();
-    if (!_wifi_event_group) {
-        ESP_LOGE(TAG, "Falha no Event Group");
-        abort();
-    }
-
-    if (esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                            &Network::wifi_event_handler, this,
-                                            &_handler_any_id) == ESP_OK &&
-        esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                            &Network::wifi_event_handler, this,
-                                            &_handler_got_ip) == ESP_OK) {
-        _handlers_registrados = true;
-    } else {
-        ESP_LOGE(TAG, "Falha ao registrar handlers");
     }
 }
 
-Network::~Network() {
-    if (_handlers_registrados) {
-        esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, _handler_any_id);
-        esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, _handler_got_ip);
-    }
-    if (_wifi_event_group) {
-        vEventGroupDelete(_wifi_event_group);
-    }
-    // Limpa semáforo se existir
-    if (_credenciais_prontas) {
-        vSemaphoreDelete(_credenciais_prontas);
-    }
-}
-
-// ==============================
-// Inicialização única
-// ==============================
-void Network::_inicializar_nvs() {
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-}
-
-void Network::_inicializar_stack_rede() {
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();   // Interface STA
-    esp_netif_create_default_wifi_ap();   
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-}
-
-// ==============================
-// Mapeamento de autenticação
-// ==============================
-std::string Network::_mapear_autenticacao(wifi_auth_mode_t mode) {
-    switch (mode) {
-        case WIFI_AUTH_OPEN:          return "Aberta";
-        case WIFI_AUTH_WEP:           return "WEP";
-        case WIFI_AUTH_WPA_PSK:       return "WPA-PSK";
-        case WIFI_AUTH_WPA2_PSK:      return "WPA2-PSK";
-        case WIFI_AUTH_WPA_WPA2_PSK:  return "WPA/WPA2-PSK";
-        case WIFI_AUTH_WPA3_PSK:      return "WPA3-PSK";
-        case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/WPA3-PSK";
-        default:                      return "Desconhecida";
-    }
-}
-
-// ==============================
-// Escaneamento
-// ==============================
-std::vector<WifiNetworkInfo> Network::escanear() {
-    std::vector<WifiNetworkInfo> resultado;
-
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_start();
-
-    wifi_scan_config_t scan_cfg = {};
-    scan_cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-
-    ESP_LOGI(TAG, "Iniciando scan...");
-    if (esp_wifi_scan_start(&scan_cfg, true) != ESP_OK) {
-        ESP_LOGE(TAG, "Falha no scan");
-        return resultado;
-    }
-
-    uint16_t num = 0;
-    esp_wifi_scan_get_ap_num(&num);
-    if (num == 0) {
-        ESP_LOGW(TAG, "Nenhuma rede encontrada.");
-        return resultado;
-    }
-
-    wifi_ap_record_t* lista = new wifi_ap_record_t[num];
-    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&num, lista));
-
-    for (int i = 0; i < num; ++i) {
-        WifiNetworkInfo info;
-        info.ssid = (strlen((char*)lista[i].ssid) == 0) ? "[Rede Oculta]" : (char*)lista[i].ssid;
-        info.rssi = lista[i].rssi;
-        info.canal = lista[i].primary;
-        info.autenticacao = _mapear_autenticacao(lista[i].authmode);
-        resultado.push_back(info);
-    }
-    delete[] lista;
-
-    esp_wifi_stop();
-    return resultado;
-}
-
-// ==============================
-// Portal de configuração (privado)
-// ==============================
-void Network::_iniciar_portal(const std::string& ap_ssid, const std::string& ap_password) {
-    // ✅ Desconectar antes de parar limpa o estado do driver STA
-    esp_wifi_disconnect();
-    esp_wifi_stop();
-    vTaskDelay(pdMS_TO_TICKS(300));  // 100ms era pouco; 300ms garante cleanup
-
-    // ✅ ESP_ERROR_CHECK aqui é crítico — sem ele, falha é invisível
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-
-    if (!_credenciais_prontas) {
-        _credenciais_prontas = xSemaphoreCreateBinary();
-        if (!_credenciais_prontas) { ESP_LOGE(TAG, "Falha ao criar semáforo"); return; }
-    }
-
-    wifi_config_t ap_config = {};
-    strncpy((char*)ap_config.ap.ssid, ap_ssid.c_str(), sizeof(ap_config.ap.ssid) - 1);
-    ap_config.ap.ssid_len = (uint8_t)ap_ssid.length();
-    ap_config.ap.max_connection = 4;
-    ap_config.ap.channel = 6;  // Canal 1 tem mais interferência; 6 ou 11 são melhores
-
-    if (ap_password.empty()) {
-        ap_config.ap.authmode = WIFI_AUTH_OPEN;
-    } else {
-        strncpy((char*)ap_config.ap.password, ap_password.c_str(), sizeof(ap_config.ap.password) - 1);
-        ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    }
-
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "AP '%s' criado. Acesse http://192.168.4.1", ap_ssid.c_str());
-
-    // Inicia servidor HTTP
-    httpd_config_t server_cfg = HTTPD_DEFAULT_CONFIG();
-    server_cfg.server_port = 80;
-    if (httpd_start(&_server, &server_cfg) != ESP_OK) {
-        ESP_LOGE(TAG, "Falha ao iniciar servidor HTTP");
+/**
+ * @brief Construtor da classe Network.
+ * 
+ * @param config_rede Modo de operação desejado (STA, AP ou AP_STA). Padrão: STA.
+ */
+Network::Network(ConfigRede config_rede) 
+    : m_wifiEventGroup(nullptr),
+      ssid(), 
+      senha(),
+      config_rede(config_rede), 
+      m_initialized(false), 
+      m_ultimoErro(ESP_OK),
+      maxTentativas(0), 
+      tentativas(0),
+      m_netifSta(nullptr),
+      m_netifAp(nullptr),
+      m_timerReconexao(nullptr) {
+      
+    m_wifiEventGroup = xEventGroupCreate();
+    if (m_wifiEventGroup == nullptr) {
+        m_ultimoErro = ESP_ERR_NO_MEM;
+        ESP_LOGE(TAG, "Falha ao alocar EventGroup");
         return;
     }
 
-    httpd_uri_t get_uri = { .uri = "/", .method = HTTP_GET, .handler = http_get_handler, .user_ctx = nullptr };
-    httpd_uri_t post_uri = { .uri = "/connect", .method = HTTP_POST, .handler = http_post_handler, .user_ctx = nullptr };
-    httpd_register_uri_handler(_server, &get_uri);
-    httpd_register_uri_handler(_server, &post_uri);
-
-    ESP_LOGI(TAG, "Portal acessível em http://192.168.4.1");
+    m_ultimoErro = init();
 }
 
-void Network::_parar_portal() {
-    if (_server) {
-        httpd_stop(_server);
-        _server = nullptr;
+/**
+ * @brief Destrutor da classe Network.
+ */
+Network::~Network() {
+    if (m_wifiEventGroup != nullptr) {
+        vEventGroupDelete(m_wifiEventGroup);
     }
-    esp_wifi_stop();   
-    vTaskDelay(pdMS_TO_TICKS(100));
-    ESP_LOGI(TAG, "Portal encerrado.");
+
+    if (m_timerReconexao != nullptr) {
+        esp_timer_stop(m_timerReconexao);
+        esp_timer_delete(m_timerReconexao);
+        m_timerReconexao = nullptr;
+    }
 }
 
-// ==============================
-// Conexão (única interface pública)
-// ==============================
-bool Network::conectar(const std::string& ssid, const std::string& password) {
-    // Se ambos os parâmetros estão vazios → modo portal
-    if (ssid.empty() && password.empty()) {
-        ESP_LOGI(TAG, "Modo portal: aguardando credenciais...");
-        _iniciar_portal();  // usa valores padrão (AP "ESP32_Config", aberto)
-
-        // Aguarda até receber as credenciais
-        xSemaphoreTake(_credenciais_prontas, portMAX_DELAY);
-
-        // Para o portal
-        _parar_portal();
-
-        // Agora _ssid e _password estão preenchidos (via http_post_handler)
-        // Continua o fluxo normal de conexão
-        // Nota: o ssid/password já estão em _ssid/_password
-    } else {
-        // Conexão direta: armazena os parâmetros
-        _ssid = ssid;
-        _password = password;
+/**
+ * @brief Inicializa a pilha de rede e o hardware Wi-Fi no modo configurado (STA, AP ou AP_STA).
+ * 
+ * Configura e inicializa a partição NVS, a camada Netif, o loop de eventos padrão,
+ * o driver Wi-Fi com configurações padrão, cria a(s) netif(s) necessária(s) de acordo
+ * com o modo escolhido, e registra os manipuladores de eventos.
+ */
+esp_err_t Network::init() {
+    if (m_initialized) {
+        return ESP_OK;
     }
 
-    // Configura modo STA
-    _tentativas = 0;
-    xEventGroupClearBits(_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    // NVS e necessario para o driver WiFi armazenar calibracoes/config.
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ret = nvs_flash_erase();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Falha ao apagar particao NVS: %s", esp_err_to_name(ret));
+            m_initialized = false;
+            m_ultimoErro = ret;
+            return ret;
+        }
+        ret = nvs_flash_init();
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Falha ao inicializar NVS: %s", esp_err_to_name(ret));
+        m_initialized = false;
+        m_ultimoErro = ret;
+        return ret;
+    }
 
-    wifi_config_t wifi_cfg = {};
-    strncpy((char*)wifi_cfg.sta.ssid, _ssid.c_str(), sizeof(wifi_cfg.sta.ssid) - 1);
-    wifi_cfg.sta.ssid[sizeof(wifi_cfg.sta.ssid) - 1] = '\0';
+    ret = esp_netif_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Falha ao inicializar esp_netif: %s", esp_err_to_name(ret));
+        m_initialized = false;
+        m_ultimoErro = ret;
+        return ret;
+    }
 
-    strncpy((char*)wifi_cfg.sta.password, _password.c_str(), sizeof(wifi_cfg.sta.password) - 1);
-    wifi_cfg.sta.password[sizeof(wifi_cfg.sta.password) - 1] = '\0';
+    ret = esp_event_loop_create_default();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Falha ao criar event loop padrao: %s", esp_err_to_name(ret));
+        m_initialized = false;
+        m_ultimoErro = ret;
+        return ret;
+    }
 
-    wifi_cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    // Cria as netifs de acordo com o modo escolhido.
+    if (config_rede == ConfigRede::STA || 
+        config_rede == ConfigRede::AP_STA) {
+        m_netifSta = esp_netif_create_default_wifi_sta();
+    }
+    if (config_rede == ConfigRede::AP || 
+        config_rede == ConfigRede::AP_STA) {
+        m_netifAp = esp_netif_create_default_wifi_ap();
+    }
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ret = esp_wifi_init(&cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Falha em esp_wifi_init: %s", esp_err_to_name(ret));
+        m_initialized = false;
+        m_ultimoErro = ret;
+        return ret;
+    }
 
-    // Aguarda resultado
-    EventBits_t bits = xEventGroupWaitBits(_wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                           pdFALSE, pdFALSE, portMAX_DELAY);
+    ret = esp_wifi_set_mode(configRedeParaWifiMode(config_rede));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Falha em esp_wifi_set_mode: %s", esp_err_to_name(ret));
+        m_initialized = false;
+        m_ultimoErro = ret;
+        return ret;
+    }
+
+    ret = esp_event_handler_instance_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &NetworkHandler::eventHandler, this, nullptr);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Falha ao registrar handler de WIFI_EVENT: %s", esp_err_to_name(ret));
+        m_initialized = false;
+        m_ultimoErro = ret;
+        return ret;
+    }
+
+    ret = esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, &NetworkHandler::eventHandler, this, nullptr);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Falha ao registrar handler de IP_EVENT: %s", esp_err_to_name(ret));
+        m_initialized = false;
+        m_ultimoErro = ret;
+        return ret;
+    }
+
+    ret = esp_wifi_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Falha em esp_wifi_start: %s", esp_err_to_name(ret));
+        m_initialized = false;
+        m_ultimoErro = ret;
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Wi-Fi inicializado no modo: %s",
+             config_rede == ConfigRede::STA ? "STA" :
+             config_rede == ConfigRede::AP  ? "AP"  : "AP_STA");
+
+    esp_timer_create_args_t timerArgs = {
+        .callback = &Network::timerReconexaoCallback,
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "wifi_reconnect_tmr",
+        .skip_unhandled_events = true
+    };
+    esp_timer_create(&timerArgs, &m_timerReconexao);
+
+    m_initialized = true;
+    m_ultimoErro = ESP_OK;
+    return ESP_OK;
+}
+
+/**
+ * @brief Executa uma varredura bloqueante das redes Wi-Fi disponíveis e imprime o resultado.
+ * 
+ * Caso o subsistema não tenha sido inicializado, a função invoca init() automaticamente.
+ * Os APs encontrados (até MAX_AP_RECORDS) são listados no terminal com SSID, RSSI, canal, autenticação e BSSID.
+ */
+esp_err_t Network::escanear() {
+    if (!m_initialized) {
+        esp_err_t ret = init();
+        if (ret != ESP_OK) return ret;
+    }
+
+    ESP_LOGI(TAG, "Iniciando escaneamento de redes WiFi...");
+
+    wifi_scan_config_t scanConfig = {};
+    scanConfig.show_hidden = true;
+
+    esp_err_t err = esp_wifi_scan_start(&scanConfig, true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Falha ao iniciar o scan: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    uint16_t apCount = 0;
+    esp_err_t ret = esp_wifi_scan_get_ap_num(&apCount);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Erro ao obter total de APs: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    if (apCount == 0) {
+        ESP_LOGW(TAG, "Nenhuma rede encontrada.");
+        return ESP_OK;
+    }
+
+    if (apCount > MAX_AP_RECORDS) {
+        apCount = MAX_AP_RECORDS;
+    }
+
+    wifi_ap_record_t apRecords[MAX_AP_RECORDS];
+    memset(apRecords, 0, sizeof(apRecords));
+
+    uint16_t apCountToFetch = apCount;
+    ret = esp_wifi_scan_get_ap_records(&apCountToFetch, apRecords);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Erro ao obter registros de APs: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Redes encontradas: %d", apCountToFetch);
+    ESP_LOGI(TAG, "-------------------------------------------------------------");
+
+    for (uint16_t i = 0; i < apCountToFetch; ++i) {
+        const wifi_ap_record_t& ap = apRecords[i];
+
+        ESP_LOGI(TAG,
+                 "SSID: %-32s | RSSI: %4d dBm | Canal: %2d | Auth: %-15s | BSSID: "
+                 "%02X:%02X:%02X:%02X:%02X:%02X",
+                 reinterpret_cast<const char*>(ap.ssid),
+                 ap.rssi,
+                 ap.primary,
+                 authModeParaString(ap.authmode),
+                 ap.bssid[0], ap.bssid[1], ap.bssid[2],
+                 ap.bssid[3], ap.bssid[4], ap.bssid[5]);
+    }
+
+    ESP_LOGI(TAG, "-------------------------------------------------------------");
+    return ESP_OK;
+}
+
+/**
+ * @brief Configura as credenciais e inicia a conexão a um ponto de acesso Wi-Fi.
+ * 
+ * @param ssid Nome da rede Wi-Fi (SSID).
+ * @param senha Senha da rede Wi-Fi (deixe vazia para redes abertas).
+ * @param maxTentativas Número máximo de tentativas consecutivas de reconexão em caso de queda.
+ */
+esp_err_t Network::conectar(const std::string& ssid, const std::string& senha, int maxTentativas) {
+    if (!m_initialized) {
+        esp_err_t ret = init();
+        if (ret != ESP_OK) return ret;
+    }
+
+    cancelarReconexao();
+    this->ssid          = ssid;
+    this->senha         = senha;
+    this->maxTentativas = maxTentativas;
+    this->tentativas    = 0;
+    xEventGroupClearBits(m_wifiEventGroup, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+
+    wifi_config_t wifiConfig = {};
+
+    strncpy(reinterpret_cast<char*>(wifiConfig.sta.ssid),
+            ssid.c_str(), sizeof(wifiConfig.sta.ssid) - 1);
+
+    strncpy(reinterpret_cast<char*>(wifiConfig.sta.password),
+            senha.c_str(), sizeof(wifiConfig.sta.password) - 1);
+
+    wifiConfig.sta.threshold.authmode = senha.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &wifiConfig);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Falha ao configurar WiFi: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Conectando a rede \"%s\" (max. %d tentativas de reconexao)...",
+             ssid.c_str(), maxTentativas);
+
+    err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Falha ao iniciar conexao: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Configura e inicia o modo Access Point (AP) do Wi-Fi.
+ * 
+ * @param ssid Nome da rede a ser divulgada pelo AP.
+ * @param senha Senha do AP. Deixe vazia para uma rede aberta (sem senha).
+ *              Se não vazia, deve ter no mínimo 8 caracteres (exigência WPA2).
+ * @param canal Canal Wi-Fi (1 a 13, dependendo da regulação local).
+ * @param maxConexoes Número máximo de estações (clientes) conectadas simultaneamente.
+ */
+esp_err_t Network::iniciarAP(const std::string& ssid, const std::string& senha,
+                         uint8_t canal, uint8_t maxConexoes) {
+    if (config_rede != ConfigRede::AP && config_rede != ConfigRede::AP_STA) {
+        ESP_LOGE(TAG, "iniciarAP() chamado, mas o modo atual nao suporta AP. "
+                      "Crie o Network com ConfigRede::AP ou ConfigRede::AP_STA.");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!m_initialized) {
+        esp_err_t ret = init();
+        if (ret != ESP_OK) return ret;
+    }
+
+    if (!senha.empty() && senha.size() < 8) {
+        ESP_LOGE(TAG, "Senha do AP deve ter no minimo 8 caracteres (ou vazia para rede aberta).");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    wifi_config_t wifiConfig = {};
+
+    strncpy(reinterpret_cast<char*>(wifiConfig.ap.ssid),
+            ssid.c_str(), sizeof(wifiConfig.ap.ssid) - 1);
+    wifiConfig.ap.ssid_len = static_cast<uint8_t>(ssid.size());
+
+    strncpy(reinterpret_cast<char*>(wifiConfig.ap.password),
+            senha.c_str(), sizeof(wifiConfig.ap.password) - 1);
+
+    wifiConfig.ap.channel        = canal;
+    wifiConfig.ap.max_connection = maxConexoes;
+    wifiConfig.ap.authmode       = senha.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+    wifiConfig.ap.pmf_cfg.required = false;
+
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_AP, &wifiConfig);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Falha ao configurar AP: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGI(TAG, "AP iniciado: SSID=\"%s\" | Canal=%d | Auth=%s | MaxConexoes=%d",
+             ssid.c_str(), canal, authModeParaString(wifiConfig.ap.authmode), maxConexoes);
+    
+    return ESP_OK;
+}
+
+/**
+ * @brief Inicia simultaneamente o Access Point (AP) e a conexão como estação (STA).
+ * 
+ * Método de conveniência para o modo ModoRede::AP_STA: configura o AP local
+ * e, em seguida, inicia a tentativa de conexão a uma rede externa como cliente.
+ * 
+ * @param apSsid SSID do Access Point a ser criado.
+ * @param apSenha Senha do Access Point (vazia para rede aberta).
+ * @param staSsid SSID da rede externa à qual se conectar como estação.
+ * @param staSenha Senha da rede externa.
+ * @param maxTentativas Número máximo de tentativas de reconexão do STA em caso de queda.
+ */
+esp_err_t Network::iniciarAPSTA(const std::string& apSsid, const std::string& apSenha,
+                           const std::string& staSsid, const std::string& staSenha,
+                           int maxTentativas) {
+    if (config_rede != ConfigRede::AP_STA) {
+        ESP_LOGE(TAG, "iniciarAPSTA() chamado, mas o modo atual nao e AP_STA. "
+                      "Crie o Network com ConfigRede::AP_STA para usar este metodo.");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ret = iniciarAP(apSsid, apSenha);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    return conectar(staSsid, staSenha, maxTentativas);
+}
+
+esp_err_t Network::aguardarConexao(uint32_t timeoutMs) {
+    if (m_wifiEventGroup == nullptr) return ESP_ERR_INVALID_STATE;
+
+    EventBits_t bits = xEventGroupWaitBits(
+        m_wifiEventGroup,
+        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+        pdFALSE,
+        pdFALSE,
+        pdMS_TO_TICKS(timeoutMs)
+    );
 
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Conectado a %s", _ssid.c_str());
-        return true;
+        return ESP_OK;
     } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGE(TAG, "Falha ao conectar a %s", _ssid.c_str());
-        return false;
+        return ESP_FAIL;
     }
-    ESP_LOGE(TAG, "Evento inesperado.");
-    return false;
+
+    return ESP_ERR_TIMEOUT;
 }
 
-// ==============================
-// Desconexão
-// ==============================
-void Network::desconectar() {
-    if (_conectado) {
-        esp_wifi_disconnect();
-        esp_wifi_stop();
-        _conectado = false;
-        xEventGroupClearBits(_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
-        ESP_LOGI(TAG, "Wi-Fi desligado.");
+bool Network::estaConectado() const {
+    if (m_wifiEventGroup == nullptr) return false;
+    return (xEventGroupGetBits(m_wifiEventGroup) & WIFI_CONNECTED_BIT) != 0;
+}
+
+/**
+ * @brief Obtém o endereço IPv4 atual formatado como string.
+ */
+std::string Network::obterIP() const {
+    esp_netif_t* netif = (m_netifSta != nullptr) ? m_netifSta : m_netifAp;
+    if (netif == nullptr) return "0.0.0.0";
+
+    esp_netif_ip_info_t ipInfo;
+    if (esp_netif_get_ip_info(netif, &ipInfo) != ESP_OK) {
+        return "0.0.0.0";
+    }
+
+    char buf[16] = {0};
+    snprintf(buf, sizeof(buf), IPSTR, IP2STR(&ipInfo.ip));
+    return std::string(buf);
+}
+
+/**
+ * @brief Obtém a máscara de sub-rede atual formatada como string.
+ */
+std::string Network::obterMascara() const {
+    esp_netif_t* netif = (m_netifSta != nullptr) ? m_netifSta : m_netifAp;
+    if (netif == nullptr) return "0.0.0.0";
+
+    esp_netif_ip_info_t ipInfo;
+    if (esp_netif_get_ip_info(netif, &ipInfo) != ESP_OK) {
+        return "0.0.0.0";
+    }
+
+    char buf[16] = {0};
+    snprintf(buf, sizeof(buf), IPSTR, IP2STR(&ipInfo.netmask));
+    return std::string(buf);
+}
+
+/**
+ * @brief Obtém o endereço do Gateway padrão formatado como string.
+ */
+std::string Network::obterGateway() const {
+    esp_netif_t* netif = (m_netifSta != nullptr) ? m_netifSta : m_netifAp;
+    if (netif == nullptr) return "0.0.0.0";
+
+    esp_netif_ip_info_t ipInfo;
+    if (esp_netif_get_ip_info(netif, &ipInfo) != ESP_OK) {
+        return "0.0.0.0";
+    }
+
+    char buf[16] = {0};
+    snprintf(buf, sizeof(buf), IPSTR, IP2STR(&ipInfo.gw));
+    return std::string(buf);
+}
+
+/**
+ * @brief Obtém o endereço físico MAC da interface ativa formatado como string (XX:XX:XX:XX:XX:XX).
+ */
+std::string Network::obterMAC() const {
+    uint8_t mac[6] = {0};
+    wifi_interface_t ifx = (config_rede == ConfigRede::AP) ? WIFI_IF_AP : WIFI_IF_STA;
+
+    if (esp_wifi_get_mac(ifx, mac) != ESP_OK) {
+        return "00:00:00:00:00:00";
+    }
+
+    char buf[18] = {0};
+    snprintf(buf, sizeof(buf), MACSTR, MAC2STR(mac));
+    return std::string(buf);
+}
+
+/**
+ * @brief Obtém a potência do sinal Wi-Fi (RSSI) em dBm quando conectado como STA.
+ * 
+ * @return Potência em dBm, ou 0 se desconectado / não aplicável.
+ */
+int8_t Network::obterRSSI() const {
+    if (!estaConectado()) {
+        return 0;
+    }
+
+    wifi_ap_record_t apInfo;
+    if (esp_wifi_sta_get_ap_info(&apInfo) != ESP_OK) {
+        return 0;
+    }
+
+    return apInfo.rssi;
+}
+
+/**
+ * @brief Define o hostname do dispositivo na rede.
+ * 
+ * @param nome Novo hostname a ser atribuído à(s) interface(s) de rede.
+ * @return true se configurado com sucesso em ao menos uma interface, false em caso de falha.
+ */
+bool Network::definirHostname(const std::string& nome) {
+    if (nome.empty()) return false;
+
+    bool sucesso = false;
+
+    if (m_netifSta != nullptr) {
+        esp_err_t ret = esp_netif_set_hostname(m_netifSta, nome.c_str());
+        if (ret == ESP_OK) {
+            sucesso = true;
+        } else {
+            ESP_LOGW(TAG, "Falha ao definir hostname na interface STA: %s", esp_err_to_name(ret));
+        }
+    }
+
+    if (m_netifAp != nullptr) {
+        esp_err_t ret = esp_netif_set_hostname(m_netifAp, nome.c_str());
+        if (ret == ESP_OK) {
+            sucesso = true;
+        } else {
+            ESP_LOGW(TAG, "Falha ao definir hostname na interface AP: %s", esp_err_to_name(ret));
+        }
+    }
+
+    return sucesso;
+}
+
+void Network::timerReconexaoCallback(void* arg) {
+    auto* self = static_cast<Network*>(arg);
+    if (self) {
+        ESP_LOGI(TAG, "Disparando tentativa de reconexao Wi-Fi...");
+        esp_wifi_connect();
     }
 }
 
-// ==============================
-// HTTP POST
-// ==============================
-int Network::enviarDadosPOST(const std::string& url, const std::string& json_payload) {
-    if (!_conectado) {
-        ESP_LOGW(TAG, "Sem conexão, envio cancelado.");
-        return -1;
+void Network::cancelarReconexao() {
+    if (m_timerReconexao && esp_timer_is_active(m_timerReconexao)) {
+        esp_timer_stop(m_timerReconexao);
+    }
+}
+
+void Network::agendarReconexao() {
+    cancelarReconexao();
+
+    // Calcula tempo com backoff exponencial: base * 2^tentativas
+    uint32_t shift = (tentativas > 30) ? 30 : tentativas;
+    uint64_t delayMs = static_cast<uint64_t>(m_backoffBaseMs) * (1ULL << shift);
+
+    if (delayMs > m_backoffMaxMs) {
+        delayMs = m_backoffMaxMs;
     }
 
-    esp_http_client_config_t config = {};
-    config.url = url.c_str();
-    config.method = HTTP_METHOD_POST;
-    config.timeout_ms = 5000;
+    ESP_LOGW(TAG, "Reconexao agendada em %llu ms (tentativa %d/%d)...",
+             delayMs, tentativas + 1, maxTentativas);
 
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) {
-        ESP_LOGE(TAG, "Falha ao criar cliente HTTP.");
-        return -1;
-    }
-
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, json_payload.c_str(), json_payload.length());
-
-    int status = -1;
-    if (esp_http_client_perform(client) == ESP_OK) {
-        status = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "POST OK, status: %d", status);
-    } else {
-        ESP_LOGE(TAG, "Falha no POST");
-    }
-
-    esp_http_client_cleanup(client);
-    return status;
+    // esp_timer recebe intervalo em microsegundos
+    esp_timer_start_once(m_timerReconexao, delayMs * 1000ULL);
 }

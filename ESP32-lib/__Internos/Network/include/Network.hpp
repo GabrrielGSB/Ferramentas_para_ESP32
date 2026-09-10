@@ -1,100 +1,76 @@
 #pragma once
-#ifndef NETWORK_HPP
-#define NETWORK_HPP
 
-#include "esp_wifi.h"
-#include "esp_event.h"
-#include "esp_netif.h"
-#include "esp_http_client.h"
-#include "esp_http_server.h"   // para o portal
-#include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
-#include "freertos/semphr.h"
 #include <string>
-#include <vector>
+#include "esp_event.h"
+#include "esp_log.h" 
+#include "esp_timer.h"
+#include "esp_netif.h"
 
-struct WifiNetworkInfo {
-    std::string ssid;
-    int rssi;
-    uint8_t canal;
-    std::string autenticacao;
+
+enum class ConfigRede {
+    STA,
+    AP,
+    AP_STA
 };
+
+/**
+ * @file Network.hpp
+ * @brief Classe simples para operacoes de rede no ESP32 usando ESP-IDF.
+ *
+ */
 
 class Network {
+    friend class NetworkHandler;
+
 public:
-    // Singleton
-    static Network& getInstance();
-
-    // Remover cópia/movimento
-    Network(const Network&)            = delete;
-    Network& operator=(const Network&) = delete;
-    Network(Network&&)                 = delete;
-    Network& operator=(Network&&)      = delete;
-
+    explicit Network(ConfigRede modo = ConfigRede::STA);
     ~Network();
 
-    // Escaneia redes disponíveis
-    std::vector<WifiNetworkInfo> escanear();
+    esp_err_t estaInicializado() const { return m_ultimoErro; }
 
-    /*
-     * Método único de conexão:
-     * - Se chamado sem argumentos (conectar()), abre portal cativo.
-     * - Se chamado com SSID (e opcionalmente senha), conecta diretamente.
-     */
-    bool conectar(const std::string& ssid = "", const std::string& password = "");
+    esp_err_t escanear();
+    esp_err_t conectar(const std::string& ssid, const std::string& senha, int maxTentativas = 5);
+    esp_err_t iniciarAP(const std::string& ssid, const std::string& senha = "",
+                   uint8_t canal = 1, uint8_t maxConexoes = 4);
+    esp_err_t iniciarAPSTA(const std::string& apSsid, const std::string& apSenha,
+                      const std::string& staSsid, const std::string& staSenha,
+                      int maxTentativas = 5);
 
-    // Desconecta e desliga rádio
-    void desconectar();
+    esp_err_t aguardarConexao(uint32_t timeoutMs = 10000);
+    bool estaConectado() const;
 
-    // Estado da conexão
-    bool estaConectado() const { return _conectado; }
+    ConfigRede modoAtual() const { return config_rede; }
 
-    // Envio HTTP POST
-    int enviarDadosPOST(const std::string& url, const std::string& json_payload);
+    // Getters de Rede
+    std::string obterIP() const;
+    std::string obterMascara() const;
+    std::string obterGateway() const;
+    std::string obterMAC() const;
+    int8_t obterRSSI() const;
+    
+    // Configuração de Identificação
+    bool definirHostname(const std::string& nome);
+
+    static void timerReconexaoCallback(void* arg);
 
 private:
-    Network();   // privado (Singleton)
+    esp_err_t  init();
 
-    // --- Estado interno ---
-    bool _conectado;
-    std::string _ssid;
-    std::string _password;
-    int _tentativas;
-    static const int MAX_RECONEXOES = 5;
+    void agendarReconexao();
+    void cancelarReconexao();
 
-    // Event Group para sincronismo WiFi
-    EventGroupHandle_t _wifi_event_group;
-    static const EventBits_t WIFI_CONNECTED_BIT = BIT0;
-    static const EventBits_t WIFI_FAIL_BIT      = BIT1;
+    EventGroupHandle_t m_wifiEventGroup;
+    std::string ssid;
+    std::string senha;
+    ConfigRede config_rede;
+    bool m_initialized;
+    esp_err_t m_ultimoErro;
+    int maxTentativas;
+    int tentativas;
+    esp_netif_t* m_netifSta = nullptr;
+    esp_netif_t* m_netifAp  = nullptr;
 
-    // Handlers de evento (registrados uma única vez)
-    esp_event_handler_instance_t _handler_any_id;
-    esp_event_handler_instance_t _handler_got_ip;
-    bool _handlers_registrados;
-
-    // Callback estático (bridge C → C++)
-    static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                                   int32_t event_id, void* event_data);
-
-    // --- Portal de configuração ---
-    httpd_handle_t _server;
-    SemaphoreHandle_t _credenciais_prontas;
-
-    // Handlers HTTP do portal
-    static esp_err_t http_get_handler(httpd_req_t *req);
-    static esp_err_t http_post_handler(httpd_req_t *req);
-
-    // Métodos internos do portal
-    void _iniciar_portal(const std::string& ap_ssid = "ESP32_Config", 
-                         const std::string& ap_password = "");
-    void _parar_portal();
-
-    // --- Inicialização única ---
-    void _inicializar_nvs();
-    void _inicializar_stack_rede();
-
-    // Utilitário
-    std::string _mapear_autenticacao(wifi_auth_mode_t mode);
+    esp_timer_handle_t m_timerReconexao;
+    uint32_t m_backoffBaseMs = 1000;
+    uint32_t m_backoffMaxMs = 60000;
 };
-
-#endif

@@ -1,12 +1,22 @@
 idf_component_register(
-    SRCS "Network.cpp"
-    INCLUDE_DIRS "include"
+    SRCS 
+        "Network.cpp"
+        "_HTTP/HTTP.cpp"
+        "_NetworkHandler/NetworkHandler.cpp"
+        "_HTTP/HTTPHandler/HTTPHandler.cpp"
+    INCLUDE_DIRS 
+        "include"
+        "_HTTP/HTTPHandler"
+        "_NetworkHandler"
+        "_HTTP"
     REQUIRES 
         esp_wifi 
+        esp_timer
         esp_event 
         esp_netif 
         esp_http_client
         esp_http_server
+        mbedtls
     PRIV_REQUIRES 
         nvs_flash
 )

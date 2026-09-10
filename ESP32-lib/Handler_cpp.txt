@@ -1,0 +1,69 @@
+#include "Handler.hpp"
+#include "Network.hpp" 
+#include "esp_log.h"
+#include "esp_wifi.h"
+
+namespace {
+    constexpr const char* TAG = "NetworkHandler";
+    constexpr EventBits_t WIFI_CONNECTED_BIT = BIT0;
+    constexpr EventBits_t WIFI_FAIL_BIT      = BIT1;
+}
+
+/**
+ * @brief Callback estático do loop de eventos para tratar eventos de Wi-Fi e IP.
+ * 
+ * @param arg Ponteiro genérico repassado no registro (instância `this` de Network).
+ * @param eventBase Base do evento (ex: WIFI_EVENT ou IP_EVENT).
+ * @param eventId Identificador numérico do evento específico.
+ * @param eventData Ponteiro com os dados associados ao evento disparado.
+ */
+void NetworkHandler::_eventHandler(void* arg, esp_event_base_t eventBase, int32_t eventId, void* eventData) {
+    // Fazemos o cast do 'arg' de volta para a classe Network
+    auto* self = static_cast<Network*>(arg);
+    if (self == nullptr) return;
+
+    if (eventBase == WIFI_EVENT && eventId == WIFI_EVENT_STA_DISCONNECTED) {
+        // Graças ao 'friend class', podemos acessar m_wifiEventGroup, tentativas e maxTentativas sem erros!
+        xEventGroupClearBits(self->m_wifiEventGroup, WIFI_CONNECTED_BIT);
+        
+        if (self->tentativas < self->maxTentativas) {
+            self->tentativas++;
+            ESP_LOGW(TAG, "Desconectado. Tentando reconectar (%d/%d)...", self->tentativas, self->maxTentativas);
+            esp_wifi_connect();
+        } else {
+            ESP_LOGE(TAG, "Falha ao reconectar a \"%s\".", self->ssid.c_str());
+            xEventGroupSetBits(self->m_wifiEventGroup, WIFI_FAIL_BIT);
+        }
+    } else if (eventBase == IP_EVENT && eventId == IP_EVENT_STA_GOT_IP) {
+        self->tentativas = 0;
+        auto* event = static_cast<ip_event_got_ip_t*>(eventData);
+        ESP_LOGI(TAG, "Conectado! IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        
+        xEventGroupSetBits(self->m_wifiEventGroup, WIFI_CONNECTED_BIT);
+        xEventGroupClearBits(self->m_wifiEventGroup, WIFI_FAIL_BIT);
+    }
+}
+
+/**
+ * @brief Callback estático do cliente HTTP para tratar eventos de resposta.
+ * 
+ * @param evt Estrutura contendo informações sobre o evento HTTP ocorrido.
+ * @return esp_err_t Código de status da execução do callback (ESP_OK para sucesso).
+ */
+esp_err_t NetworkHandler::_httpEventHandler(esp_http_client_event_t *evt) {
+    switch (evt->event_id) {
+        case HTTP_EVENT_ON_DATA: {
+            auto* responseBuffer = static_cast<std::string*>(evt->user_data);
+            if (responseBuffer != nullptr && evt->data != nullptr && evt->data_len > 0) {
+                responseBuffer->append(static_cast<char*>(evt->data), evt->data_len);
+            }
+            break;
+        }
+        case HTTP_EVENT_ERROR:
+            ESP_LOGE(TAG, "Erro durante a execução HTTP");
+            break;
+        default:
+            break;
+    }
+    return ESP_OK;
+}

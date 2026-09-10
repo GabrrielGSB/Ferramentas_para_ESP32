@@ -2,6 +2,7 @@
 
 #include <string>
 #include "esp_event.h"
+<<<<<<< HEAD
 #include "esp_log.h" 
 #include "esp_timer.h"
 #include "esp_netif.h"
@@ -12,6 +13,19 @@ enum class ConfigRede {
     AP,
     AP_STA
 };
+=======
+#include "esp_http_client.h"
+#include "esp_log.h" 
+
+/**
+ * @file Network.hpp
+ * @brief Classe simples para operacoes de rede no ESP32 usando ESP-IDF.
+ *
+ * Nesta primeira versao, a classe implementa apenas o escaneamento
+ * de redes WiFi disponiveis, imprimindo no terminal (log) as
+ * informacoes mais importantes de cada rede encontrada.
+ */
+>>>>>>> cc201997246647185eafbcfd08eff57babf23b86
 
 /**
  * @file Network.hpp
@@ -23,6 +37,7 @@ class Network {
     friend class NetworkHandler;
 
 public:
+<<<<<<< HEAD
     explicit Network(ConfigRede modo = ConfigRede::STA);
     ~Network();
 
@@ -73,4 +88,32 @@ private:
     esp_timer_handle_t m_timerReconexao;
     uint32_t m_backoffBaseMs = 1000;
     uint32_t m_backoffMaxMs = 60000;
+=======
+    Network();
+    ~Network();
+
+
+    void escanear();
+    void conectar(const std::string& ssid, const std::string& senha, int maxTentativas = 5);
+
+    bool aguardarConexao(uint32_t timeoutMs = 10000);
+    bool estaConectado() const;
+
+    std::string httpGet(const std::string& url);
+
+private:
+    void init();
+
+    static void _eventHandler(void* arg, esp_event_base_t eventBase,
+                              int32_t eventId, void* eventData);
+
+    static esp_err_t _httpEventHandler(esp_http_client_event_t *evt);
+
+    bool m_initialized;
+    EventGroupHandle_t m_wifiEventGroup;
+    std::string ssid;
+    std::string senha;
+    int maxTentativas;
+    int tentativas;
+>>>>>>> cc201997246647185eafbcfd08eff57babf23b86
 };

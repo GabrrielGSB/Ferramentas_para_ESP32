@@ -20,6 +20,7 @@ namespace {
  */
 void NetworkHandler::eventHandler(void* arg, esp_event_base_t eventBase, int32_t eventId, void* eventData) {
     auto* self = static_cast<Network*>(arg);
+    
     if (self == nullptr) return;
 
     if (eventBase == WIFI_EVENT) {

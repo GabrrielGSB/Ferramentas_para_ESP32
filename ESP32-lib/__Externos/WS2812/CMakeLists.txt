@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS 
+        "WS2812.cpp"
+    INCLUDE_DIRS 
+        "include"
+    REQUIRES 
+        GPIO
+        esp_driver_rmt
+        esp_driver_gpio
+        driver
+        log
+        freertos
+)

@@ -21,9 +21,14 @@ static inline void delay_us(uint32_t us) {
     esp_rom_delay_us(us);
 }
 
+static inline void delayAte(TickType_t* ultimoTempoAcordado, uint32_t periodoMs) {
+    vTaskDelayUntil(ultimoTempoAcordado, pdMS_TO_TICKS(periodoMs));
+}
+
 static inline uint64_t millis() {
     return (esp_timer_get_time() / 1000ULL);
 }
+
 
 
 

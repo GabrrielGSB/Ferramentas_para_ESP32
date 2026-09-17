@@ -1,7 +1,6 @@
 idf_component_register(
     SRCS 
         "Network.cpp"
-<<<<<<< HEAD
         "_HTTP/HTTP.cpp"
         "_NetworkHandler/NetworkHandler.cpp"
         "_HTTP/HTTPHandler/HTTPHandler.cpp"
@@ -18,16 +17,5 @@ idf_component_register(
         esp_http_client
         esp_http_server
         mbedtls
-    PRIV_REQUIRES 
-=======
-    INCLUDE_DIRS 
-        "include"
-    REQUIRES 
-        esp_wifi
-        esp_event
-        esp_netif
->>>>>>> cc201997246647185eafbcfd08eff57babf23b86
         nvs_flash
-        esp_http_client
-        mbedtls
 )

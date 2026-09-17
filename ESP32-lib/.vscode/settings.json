@@ -56,5 +56,6 @@
   "C_Cpp_Runner.useLeakSanitizer": false,
   "C_Cpp_Runner.showCompilationTime": false,
   "C_Cpp_Runner.useLinkTimeOptimization": false,
-  "C_Cpp_Runner.msvcSecureNoWarnings": false
+  "C_Cpp_Runner.msvcSecureNoWarnings": false,
+  "cmake.sourceDirectory": "C:/Users/G.Gonzaga.S.Barreto/Desktop/CODIGOS/ESP32/Ferramentas_para_ESP32/ESP32-lib/__FreeRTOS"
 }

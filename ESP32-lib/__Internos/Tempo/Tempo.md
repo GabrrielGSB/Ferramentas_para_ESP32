@@ -96,14 +96,34 @@ uint64_t agora = millis(); // ex: 3520 ms desde o boot
 
 ---
 
+### `delay_ate(ultimoTempo, periodoMs)` / `delayAte(...)` — Delay periódico preciso
+
+```cpp
+void delay_ate(TickType_t* ultimoTempoAcordado, uint32_t periodoMs);
+void delayAte(TickType_t* ultimoTempoAcordado, uint32_t periodoMs);
+```
+
+Baseado em `vTaskDelayUntil`. Executa um atraso absoluto em relação à última ativação da tarefa, evitando desvio de tempo (*timing drift*) acumulado e garantindo taxa de execução constante.
+
+```cpp
+TickType_t ultimoTempo = xTaskGetTickCount();
+while (true) {
+    delay_ate(&ultimoTempo, 100); // Garante execução a 10 Hz exatos
+    lerSensores();
+}
+```
+
+---
+
 ## Diferença entre os delays
 
-| Função       | Unidade  | Mecanismo        | Cede CPU? | Uso recomendado                    |
-|--------------|----------|------------------|-----------|------------------------------------|
-| `delay_ms`   | ms       | `vTaskDelay`     | ✅ Sim    | Esperas gerais no loop             |
-| `delay_s`    | s        | `vTaskDelay`     | ✅ Sim    | Esperas longas legíveis            |
-| `delay_h`    | h        | `vTaskDelay`     | ✅ Sim    | Ciclos de monitoramento            |
-| `delay_us`   | µs       | busy-wait        | ❌ Não    | Temporização de precisão curta     |
+| Função       | Unidade  | Mecanismo          | Cede CPU? | Uso recomendado                          |
+|--------------|----------|--------------------|-----------|------------------------------------------|
+| `delay_ms`   | ms       | `vTaskDelay`       | ✅ Sim    | Esperas gerais no loop                   |
+| `delay_s`    | s        | `vTaskDelay`       | ✅ Sim    | Esperas longas legíveis                  |
+| `delay_h`    | h        | `vTaskDelay`       | ✅ Sim    | Ciclos de monitoramento                  |
+| `delay_us`   | µs       | busy-wait          | ❌ Não    | Temporização de precisão curta           |
+| `delay_ate`  | ms       | `vTaskDelayUntil`  | ✅ Sim    | Loops periódicos precisos (sem drift)    |
 
 ---
 

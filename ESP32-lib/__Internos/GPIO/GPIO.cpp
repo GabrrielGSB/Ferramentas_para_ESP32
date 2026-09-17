@@ -31,7 +31,7 @@ void GPIO::inverter() {
     }
 }
 
-int GPIO::ler() {
+bool GPIO::ler() {
     return gpio_get_level(pino);
 }
 

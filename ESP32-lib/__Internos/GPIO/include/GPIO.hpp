@@ -137,18 +137,44 @@ protected:
     uint8_t estado_atual;      
 
 public:
+    /**
+     * @brief Construtor da classe GPIO. Reseta o pino, define sua direção e configura resistores de pull.
+     * @param numPino Número do pino GPIO (ex: GPIO2, GPIO4).
+     * @param modoPino Direção de operação (OUTPUT, INPUT, INPUT_OUTPUT, OPEN_DRAIN).
+     * @param modoPull Configuração do resistor interno (NOPULL, PULLUP, PULLDOWN). Padrão: NOPULL.
+     */
     GPIO(gpio_num_t numPino, gpio_mode_t modoPino, gpio_pull_mode_t modoPull = NOPULL);
 
+    /**
+     * @brief Define o nível lógico alto (1 / 3.3V) no pino.
+     * @note Válido apenas para pinos configurados como OUTPUT ou INPUT_OUTPUT.
+     */
     void ligar();
+
+    /**
+     * @brief Define o nível lógico baixo (0 / 0V) no pino.
+     * @note Válido apenas para pinos configurados como OUTPUT ou INPUT_OUTPUT.
+     */
     void desligar();
+
+    /**
+     * @brief Inverte o estado lógico atual da saída digital.
+     * @note Válido apenas para pinos configurados como OUTPUT ou INPUT_OUTPUT.
+     */
     void inverter();
 
+    /**
+     * @brief Realiza a leitura do nível lógico atual presente no pino.
+     * @return int Nível lógico lido do hardware (1 ou 0).
+     */
+    bool ler();
 
-    int ler();
-
+    /**
+     * @brief Altera dinamicamente a configuração do resistor de pull interno.
+     * @param modoPull Novo modo do resistor de pull (NOPULL, PULLUP, PULLDOWN).
+     * @note Tem efeito apenas em pinos configurados como INPUT ou INPUT_OUTPUT.
+     */
     void configPull(gpio_pull_mode_t modoPull);
-
-    // gpio_num_t obterPino() const { return pino; }
 };
 
 #endif

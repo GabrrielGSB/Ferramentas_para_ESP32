@@ -5,7 +5,19 @@
 #include "esp_log.h" 
 #include "esp_timer.h"
 #include "esp_netif.h"
+#include "HTTP.hpp" 
 
+/*
+struct dados_wifi{
+       float condutividade=0;
+       float corrent=0;
+       float tensao=0;
+       float potencia=0;
+       float ph=0;
+       float salmora=0;
+       int timestamp=0;
+};
+*/
 enum class ConfigRede {
     STA,
     AP,
@@ -20,6 +32,8 @@ class Network {
     friend class NetworkHandler;
 
 public:
+    HTTP http;
+    
     explicit Network(ConfigRede modo = ConfigRede::STA);
     ~Network();
 

@@ -25,7 +25,6 @@ void NetworkHandler::eventHandler(void* arg, esp_event_base_t eventBase, int32_t
 
     if (eventBase == WIFI_EVENT) {
         switch (eventId) {
-
             case WIFI_EVENT_STA_DISCONNECTED: {
                 xEventGroupClearBits(self->m_wifiEventGroup, WIFI_CONNECTED_BIT);
 

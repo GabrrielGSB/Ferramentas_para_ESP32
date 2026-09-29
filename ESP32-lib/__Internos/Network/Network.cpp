@@ -1,12 +1,17 @@
 #include "Network.hpp"
 
 #include <cstring>
+#include <ctime>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "nvs_flash.h"
 #include "esp_crt_bundle.h"
 #include "NetworkHandler.hpp"
@@ -550,6 +555,43 @@ bool Network::definirHostname(const std::string& nome) {
     }
 
     return sucesso;
+}
+
+/**
+ * @brief Sincroniza o relógio interno do ESP32 com servidores NTP.
+ *        Obrigatório para validação de certificados SSL/TLS (HTTPS).
+ * 
+ * @param servidorNtp Endereço do servidor NTP (padrão: "time.google.com").
+ * @param maxTentativas Número máximo de verificações com intervalo de 1s (padrão: 15).
+ * @return true se a sincronização foi bem sucedida, false caso contrário.
+ */
+bool Network::sincronizarHorario(const std::string& servidorNtp, int maxTentativas) {
+    ESP_LOGI(TAG, "Iniciando sincronizacao de relogio via NTP (%s)...", servidorNtp.c_str());
+
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(servidorNtp.c_str());
+    esp_netif_sntp_init(&config);
+
+    // Aguarda até obter uma data válida (> ano 2024)
+    int tentativas = 0;
+    while (tentativas < maxTentativas) {
+        time_t agora = time(nullptr);
+        struct tm info = {};
+        localtime_r(&agora, &info);
+
+        if (info.tm_year >= (2024 - 1900)) {
+            ESP_LOGI(TAG, "Data sincronizada: %02d/%02d/%04d %02d:%02d:%02d (Timestamp: %lld)",
+                     info.tm_mday, info.tm_mon + 1, info.tm_year + 1900,
+                     info.tm_hour, info.tm_min, info.tm_sec, (long long)agora);
+            return true;
+        }
+
+        ESP_LOGI(TAG, "Aguardando sincronizacao NTP... (%d/%d)", tentativas + 1, maxTentativas);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        tentativas++;
+    }
+
+    ESP_LOGE(TAG, "FALHA CRITICA: Nao foi possivel sincronizar o relogio. Certificados SSL irao falhar!");
+    return false;
 }
 
 void Network::timerReconexaoCallback(void* arg) {

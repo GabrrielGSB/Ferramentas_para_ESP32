@@ -62,6 +62,9 @@ public:
     // Configuração de Identificação
     bool definirHostname(const std::string& nome);
 
+    // Sincronização NTP
+    bool sincronizarHorario(const std::string& servidorNtp = "time.google.com", int maxTentativas = 15);
+
     static void timerReconexaoCallback(void* arg);
 
 private:

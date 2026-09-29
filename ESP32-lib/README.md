@@ -77,6 +77,7 @@ Implementação de loops de execução e serviços assíncronos prontos para o F
 ### 8. `__Dados/` — Formatação e Armazenamento
 Módulos responsáveis por serialização, decodificação e processamento de fluxos de dados:
 - **`JSON/`**: Wrapper para manipulação ergonômica de documentos JSON (criação, parsing e leitura de campos).
+- **`Random/`**: Utilitário estático para geração de números aleatórios (hardware RNG) em faixas inteiras e ponto flutuante.
 
 ---
 

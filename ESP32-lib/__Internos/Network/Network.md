@@ -80,6 +80,7 @@ enum class ConfigRede {
 | `obterMAC()` | `std::string` | Endereço físico MAC formatado (`"XX:XX:XX:XX:XX:XX"`) |
 | `obterRSSI()` | `int8_t` | Potência de recepção do sinal em dBm (ou 0 se desconectado) |
 | `definirHostname(nome)` | `bool` | Define o nome de host do ESP32 na rede local |
+| `sincronizarHorario(servidorNtp, maxTentativas)` | `bool` | Sincroniza o relógio interno via SNTP para validação de certificados SSL/TLS |
 
 ---
 
